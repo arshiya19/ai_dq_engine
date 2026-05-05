@@ -1,0 +1,11 @@
+CDE: revenue
+Table: pandl
+Rule: must not be null
+
+CDE: cost
+Table: pandl
+Rule: must not be null
+
+CDE: profit
+Table: pandl
+Rule: profit should be >= 0
