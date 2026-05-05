@@ -1,7 +1,5 @@
 import streamlit as st
-from dq_engine import read_rules, generate_sql_llm, run_query, interpret_result_llm
-import psycopg2
-import os
+from dq_engine import generate_sql_from_question, run_query, get_connection, format_result
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,33 +11,27 @@ user_input = st.text_input("Ask about your data quality:")
 if user_input:
     st.write(f"🔍 You asked: {user_input}")
 
-    # Connect DB
-    conn = psycopg2.connect(
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT"),
-        database=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        sslmode="require"
-    )
+    try:
+        conn = get_connection()
 
-    rules = read_rules("cde_rules.txt")
+        # Generate SQL from LLM
+        sql = generate_sql_from_question(user_input)
 
-    matched = False
+        st.code(sql, language="sql")
 
-    for rule in rules:
-        cde = rule["cde"]
+        # Run query
+        result = run_query(conn, sql)  
 
-        if cde.lower() in user_input.lower():
-            matched = True
+        # Format result (no LLM here)
+        message = format_result(user_input, result)
 
-            sql = generate_sql_llm(rule["table"], cde, rule["rule"])
-            result = run_query(conn, sql)
-            message = interpret_result_llm(cde, rule["rule"], result)
+        st.success(message)
 
-            st.success(message)
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
 
-    if not matched:
-        st.warning("No matching CDE found. Try: revenue, cost, profit")
-
-    conn.close()
+    finally:
+        try:
+            conn.close()
+        except:
+            pass

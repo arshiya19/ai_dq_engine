@@ -1,148 +1,101 @@
 import os
-import psycopg2
 from dotenv import load_dotenv
-from openai import OpenAI
+import snowflake.connector
+import boto3
+import json
 
 load_dotenv()
 
 # -----------------------------
 # CONFIG
 # -----------------------------
-client = OpenAI()
-
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "port": int(os.getenv("DB_PORT", 5432)),
-    "database": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD")
-}
-
-RULE_FILE = os.getenv("RULE_FILE", "cde_rules.txt")
+bedrock = boto3.client(
+    service_name="bedrock-runtime",
+    region_name="us-east-1"
+)
 
 # -----------------------------
-# READ RULE FILE
+# SNOWFLAKE CONNECTION
 # -----------------------------
-def read_rules(file_path):
-    rules = []
-    with open(file_path, "r") as f:
-        block = {}
-        for line in f:
-            line = line.strip()
-            if not line:
-                if block:
-                    rules.append(block)
-                    block = {}
-                continue
-
-            key, value = line.split(":", 1)
-            block[key.strip().lower()] = value.strip()
-
-        if block:
-            rules.append(block)
-
-    return rules
-
-
-# -----------------------------
-# LLM → SQL GENERATION
-# -----------------------------
-def generate_sql_llm(table, column, rule):
-    prompt = f"""
-You are a data quality SQL generator.
-
-Table: {table}
-Column: {column}
-Rule: {rule}
-
-Generate ONLY SQL (no explanation).
-Return a query that counts violations.
-"""
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
+def get_connection():
+    return snowflake.connector.connect(
+        user=os.getenv("SNOWFLAKE_USER"),
+        password=os.getenv("SNOWFLAKE_PASSWORD"),
+        account=os.getenv("SNOWFLAKE_ACCOUNT"),
+        warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
+        database=os.getenv("SNOWFLAKE_DATABASE"),
+        schema=os.getenv("SNOWFLAKE_SCHEMA")
     )
 
-    sql = response.choices[0].message.content.strip()
+# -----------------------------
+# LLM → SQL FROM QUESTION
+# -----------------------------
+def generate_sql_from_question(user_question):
+    prompt = f"""
+You are an AI Data Quality Assistant.
 
-    # clean markdown if present
-    sql = sql.replace("```sql", "").replace("```", "").strip()
+Table: PANDL
 
-    return sql
+Columns:
+- REVENUE (can have NULL)
+- COST (can have NULL)
+- PROFIT (should not be negative)
 
+User Question:
+{user_question}
+
+Generate a Snowflake SQL query.
+
+Rules:
+- For nulls → use IS NULL
+- For negative values → use < 0
+- Always use COUNT(*) when counting issues
+
+Return ONLY SQL.
+"""
+
+    body = json.dumps({
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 200
+    })
+
+    response = bedrock.invoke_model(
+        modelId="qwen.qwen3-coder-next",
+        body=body
+    )
+
+    result = json.loads(response["body"].read())
+
+    return result["choices"][0]["message"]["content"].strip()
 
 # -----------------------------
 # RUN QUERY
 # -----------------------------
 def run_query(conn, sql):
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        result = cur.fetchone()[0]
+    cur = conn.cursor()
+    cur.execute(sql)
+    result = cur.fetchone()[0]
+    cur.close()
     return result
 
-
 # -----------------------------
-# LLM → RESULT INTERPRETATION
+# FORMAT RESULT (NO LLM)
 # -----------------------------
-def interpret_result_llm(cde, rule, result):
-    prompt = f"""
-CDE: {cde}
-Rule: {rule}
-Violation Count: {result}
+def format_result(question, result):
+    question = question.lower()
 
-Explain in 1 short business-friendly sentence.
-"""
+    if "revenue" in question:
+        column = "revenue"
+    elif "cost" in question:
+        column = "cost"
+    elif "profit" in question:
+        column = "profit"
+    else:
+        return f"Result: {result}"
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
-    )
-
-    return response.choices[0].message.content.strip()
-
-
-# -----------------------------
-# MAIN FLOW
-# -----------------------------
-def main():
-    print("🚀 AI Data Quality Engine Started\n")
-
-    conn = psycopg2.connect(
-    host=os.getenv("DB_HOST"),
-    port=os.getenv("DB_PORT"),
-    database=os.getenv("DB_NAME"),
-    user=os.getenv("DB_USER"),
-    password=os.getenv("DB_PASSWORD"),
-    sslmode="require"
-)
-    rules = read_rules(RULE_FILE)
-
-    for rule in rules:
-        cde = rule["cde"]
-        table = rule["table"]
-        rule_text = rule["rule"]
-
-        print(f"➡️ Processing: {cde}")
-
-        # LLM generates SQL
-        sql = generate_sql_llm(table, cde, rule_text)
-        print(f"Generated SQL:\n{sql}")
-
-        # Execute
-        result = run_query(conn, sql)
-
-        # LLM explains result
-        message = interpret_result_llm(cde, rule_text, result)
-
-        print(f"📊 Result: {message}")
-        print("-" * 50)
-
-    conn.close()
-    print("\n✅ Completed")
-
-
-if __name__ == "__main__":
-    main()
+    if result == 0:
+        return f"No issues found in {column} ✅"
+    else:
+        return f"{result} records are missing or invalid in {column}"
