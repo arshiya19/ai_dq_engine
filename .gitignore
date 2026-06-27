@@ -1,1 +1,4 @@
 .env
+pandl.db
+__pycache__/
+venv/

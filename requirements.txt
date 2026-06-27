@@ -1,4 +1,4 @@
-psycopg2-binary
-python-dotenv
-openai
 streamlit
+boto3
+python-dotenv
+snowflake-connector-python

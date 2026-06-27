@@ -1,6 +1,6 @@
 import os
+import sqlite3
 from dotenv import load_dotenv
-import snowflake.connector
 import boto3
 import json
 
@@ -9,23 +9,29 @@ load_dotenv()
 # -----------------------------
 # CONFIG
 # -----------------------------
+USE_LOCAL_DB = os.getenv("USE_LOCAL_DB", "true").lower() == "true"
+
 bedrock = boto3.client(
     service_name="bedrock-runtime",
     region_name="us-east-1"
 )
 
 # -----------------------------
-# SNOWFLAKE CONNECTION
+# DATABASE CONNECTION
 # -----------------------------
 def get_connection():
-    return snowflake.connector.connect(
-        user=os.getenv("SNOWFLAKE_USER"),
-        password=os.getenv("SNOWFLAKE_PASSWORD"),
-        account=os.getenv("SNOWFLAKE_ACCOUNT"),
-        warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-        database=os.getenv("SNOWFLAKE_DATABASE"),
-        schema=os.getenv("SNOWFLAKE_SCHEMA")
-    )
+    if USE_LOCAL_DB:
+        return sqlite3.connect("pandl.db")
+    else:
+        import snowflake.connector
+        return snowflake.connector.connect(
+            user=os.getenv("SNOWFLAKE_USER"),
+            password=os.getenv("SNOWFLAKE_PASSWORD"),
+            account=os.getenv("SNOWFLAKE_ACCOUNT"),
+            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
+            database=os.getenv("SNOWFLAKE_DATABASE"),
+            schema=os.getenv("SNOWFLAKE_SCHEMA")
+        )
 
 # -----------------------------
 # LLM → SQL FROM QUESTION
@@ -44,14 +50,14 @@ Columns:
 User Question:
 {user_question}
 
-Generate a Snowflake SQL query.
+Generate a SQL query compatible with SQLite.
 
 Rules:
 - For nulls → use IS NULL
 - For negative values → use < 0
 - Always use COUNT(*) when counting issues
 
-Return ONLY SQL.
+Return ONLY SQL. No explanation, no markdown formatting.
 """
 
     body = json.dumps({
@@ -68,7 +74,13 @@ Return ONLY SQL.
 
     result = json.loads(response["body"].read())
 
-    return result["choices"][0]["message"]["content"].strip()
+    sql = result["choices"][0]["message"]["content"].strip()
+    # Clean up markdown code fences if present
+    if sql.startswith("```"):
+        sql = "\n".join(sql.split("\n")[1:])
+    if sql.endswith("```"):
+        sql = "\n".join(sql.split("\n")[:-1])
+    return sql.strip()
 
 # -----------------------------
 # RUN QUERY

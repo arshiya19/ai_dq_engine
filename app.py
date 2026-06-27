@@ -1,8 +1,14 @@
+import os
 import streamlit as st
 from dq_engine import generate_sql_from_question, run_query, get_connection, format_result
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Auto-create local DB if it doesn't exist (needed for Streamlit Cloud)
+if os.getenv("USE_LOCAL_DB", "true").lower() == "true":
+    if not os.path.exists("pandl.db"):
+        import setup_local_db  # noqa: F401
 
 st.title("🤖 AI Data Quality Assistant")
 
